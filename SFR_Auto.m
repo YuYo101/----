@@ -58,45 +58,42 @@ T=N/Fs;
 load([FilePath,'ir.mat']);
 ir=ir(:,1:NchR,1:NchS);
 % ir=resample(ir,Fs,44100);
+% 优化: 使用向量化FFT一次性计算所有通道
 HestAll=zeros(N,NchR,NchS);
 for i=1:NchR
-    for j=1:NchS
-        HestAll(:,i,j)=fft(ir(:,i,j), N);
-    end
+    HestAll(:,i,:)=fft(ir(:,i,:), N, 1);  % 沿第一维度FFT,向量化处理
 end
 % 计算svd结果
-G=zeros(NchR,NchS);
+% 优化: 预分配并直接使用三维矩阵索引
 U_svd=zeros(N,NchR,NchR);
 S_svd=zeros(N,NchR,NchR);
 V_svd=zeros(N,NchR,NchR);
 for nf=1:N
-    for j=1:NchR
-        for k=1:NchS
-            G(j,k)=HestAll(nf,j,k);
-        end
-    end
+    % 优化: 直接使用squeeze提取二维切片,避免双重循环
+    G = squeeze(HestAll(nf,:,:));
     [U_svd(nf,:,:),S_svd(nf,:,:),V_svd(nf,:,:)] = svd(G);
 end
 %% 正则化参数
 lmd0=1;
 lmd = zeros(N, min(NchS,NchR));
 %混合正则化参数
-s=zeros(min(NchS,NchR),N);
 s0=1/2/lmd0;
+% 优化: 向量化提取对角线元素和正则化参数计算
 L_s=zeros(N,NchS,NchR);
 for nf=1:N
-    s(:,nf) = diag(squeeze(S_svd(nf,:,:)));
-    for i=1:min(NchS,NchR)
-        if s(i,nf)>=1/s0
-            lmd(nf,i)=0;
-        elseif s(i,nf)>1/2/s0
-            lmd(nf,i)=sqrt(s(i,nf)/s0-s(i,nf)^2);
-        else
-            lmd(nf,i)=1/2/s0;
-        end
-    end
-    for k=1:min(NchS,NchR) %%奇异值矩阵
-        L_s(nf,k,k)=S_svd(nf,k,k)/(S_svd(nf,k,k)^2+lmd(nf,k)^2);
+    s = diag(squeeze(S_svd(nf,:,:)));
+    % 向量化计算正则化参数
+    lmd_temp = zeros(min(NchS,NchR),1);
+    lmd_temp(s>=1/s0) = 0;
+    mask_mid = (s>1/2/s0) & (s<1/s0);
+    lmd_temp(mask_mid) = sqrt(s(mask_mid)/s0-s(mask_mid).^2);
+    lmd_temp(s<=1/2/s0) = 1/2/s0;
+    lmd(nf,:) = lmd_temp';
+
+    % 向量化计算L_s矩阵
+    S_diag = diag(squeeze(S_svd(nf,:,:)));
+    for k=1:min(NchS,NchR)
+        L_s(nf,k,k) = S_diag(k)/(S_diag(k)^2+lmd(nf,k)^2);
     end
 end
 %% 驱动信号计算
@@ -104,14 +101,13 @@ TargetSound_V = TargetSound.*Sensi;  % 将声压数据转换为电压数据[Pa]*
 yro=TargetSound_V(1:N,1:NchR);
 Ro = fft(yro,N);          % 使用fft函数将yro矩阵变为频域信号R
 % 进行声场复现计算
+% 优化: 预计算VLU矩阵,避免反馈循环中重复计算
 S = zeros(NchS, N);
 VLU=zeros(N,NchS,NchR);
 for nf = 1:N                                % 采样点设置
-    %复现慢反馈快
+    % 预计算VLU = V * L_s * U'
     VLU(nf,:,:)=(squeeze(V_svd(nf,:,:))) * (squeeze(L_s(nf,:,:))) * (squeeze(U_svd(nf,:,:)))';
     S(:,nf)=(squeeze(VLU(nf,:,:)))*(Ro(nf,1:NchR).');
-    %复现快反馈慢
-    % S(:,nf)=(squeeze(V_svd(nf,:,:)) * (squeeze(L_s(nf,:,:))) * (squeeze(U_svd(nf,:,:)))')*(Ro(nf,1:NchR).');
 end
 Eest = S.';
 eest = ifft(Eest);
