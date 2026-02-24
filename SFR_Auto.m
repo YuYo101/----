@@ -180,23 +180,28 @@ release(fileWriter);
 ReproductionSound=ReproductionSound(1:N,1:NchR);
 %导出Feedback变量到工作区，重置反馈声为目标声
 yo_fb = TargetSound_V;   %%%循环外
-%基于1/3倍频程带宽的误差计算
-OBands = [20, 20000];
-O = poctave(TargetSound_V(BufferSize*10+1:end-BufferSize*10,1:NchR),Fs,...
-    'FrequencyLimits',OBands,'BandsPerOctave',3);
-R = poctave(ReproductionSound(BufferSize*10+1:end-BufferSize*10,1:NchR),Fs,...
-    'FrequencyLimits',OBands,'BandsPerOctave',3);
+%基于自定义频带的误差计算
+% 定义自定义频带: 30个频带，20Hz开始，每10Hz一个频带
+numcf = 30;  % 频带数量
+FreqBands = zeros(numcf, 2);
+for i = 1:numcf
+    FreqBands(i,1) = 20 + (i-1)*10;  % 下限频率
+    FreqBands(i,2) = 20 + i*10;      % 上限频率
+end
+FreqCenter = mean(FreqBands, 2);  % 中心频率
+
+% 计算目标声和复现声在各频带的能量
+O = computeBandEnergy(TargetSound_V(BufferSize*10+1:end-BufferSize*10,1:NchR), Fs, FreqBands);
+R = computeBandEnergy(ReproductionSound(BufferSize*10+1:end-BufferSize*10,1:NchR), Fs, FreqBands);
 Error = 10.*log10(O./R);
 Error = Error.';
-poctcf=[20,25,31.5,40,50,63,80,100,125,160,200,250,315,400,500,630,800,...
-    1000,1250,1600,2000,2500,3150,4000,5000,6300,8000,10000,12500,16000,20000];
-EdB=[protcf;Error];
+EdB=[FreqCenter.'; Error];
 save([FilePath,'Error.mat'],"EdB");
-FreL=20;FreU=5000;             %%%%%%%反馈频段%%%%%%%%
-NumL=find(poctcf==FreL);NumU=find(poctcf==FreU);            
+FreL=20;FreU=300;             %%%%%%%反馈频段%%%%%%%%
+NumL=find(FreqCenter==FreL);NumU=find(FreqCenter>=FreU,1,'first');
 FBDone=0;
 %%%%%%%%%   反馈循环     %%%%%%%%%
-Nfb=3;numcf=31;
+Nfb=3;
 for Nfbi=1+FBDone:Nfb+FBDone
     FBDone_in=0;
     %增益计算
@@ -222,14 +227,9 @@ for Nfbi=1+FBDone:Nfb+FBDone
         end
     end
     %反馈声源信号计算
-    %                  %1/3倍频程graphic均衡器
-    % *************graphicEQ属性固定30个中心频率[25:20000]********************
-    % 优化: 提前创建均衡器对象,只设置一次参数
-    equalizer = graphicEQ('EQOrder',12,'Bandwidth','1/3 octave', ...
-        'Structure','Cascade', 'SampleRate',Fs);
+    % 使用自定义频带均衡器
     for i = 1:NchR
-        equalizer.Gains = Gain(i,numcf-29:end);  %%%%%%%%[25:20000]
-        yo_fb(:,i) = equalizer(yo_fb(:,i));
+        yo_fb(:,i) = applyCustomEQ(yo_fb(:,i), Gain(i,:), FreqBands, Fs);
     end
     % 获取多通道传声器记录的目标声场数据存放于yo矩阵中
     yo = yo_fb;     %均衡后的TargetSound_V
@@ -300,15 +300,12 @@ for Nfbi=1+FBDone:Nfb+FBDone
     release(fileWriter);
     [FeedbackSound, ~] = audioread(AudioFromDevice);
     FeedbackSound=FeedbackSound(1:N,1:NchR);
-    %基于1/3倍频程带宽的误差计算
-    OBands = [20, 20000];
-    O = poctave(TargetSound_V(BufferSize*10+1:end-BufferSize*10,1:NchR),Fs,... 
-        'FrequencyLimits',OBands,'BandsPerOctave',3);
-    R = poctave(FeedbackSound(BufferSize*10+1:end-BufferSize*10,1:NchR),Fs,...
-        'FrequencyLimits',OBands,'BandsPerOctave',3);
+    %基于自定义频带的误差计算
+    O = computeBandEnergy(TargetSound_V(BufferSize*10+1:end-BufferSize*10,1:NchR), Fs, FreqBands);
+    R = computeBandEnergy(FeedbackSound(BufferSize*10+1:end-BufferSize*10,1:NchR), Fs, FreqBands);
     Error = 10.*log10(O./R);
     Error = Error.';
-    EdB=[protcf;Error];
+    EdB=[FreqCenter.'; Error];
     save([FilePath,'Error',num2str(Nfbi),'.mat'],"EdB");
     FBDone_in=FBDone_in+1;
 end
