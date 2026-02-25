@@ -66,8 +66,8 @@ end
 % 计算svd结果
 % 优化: 预分配并直接使用三维矩阵索引
 U_svd=zeros(N,NchR,NchR);
-S_svd=zeros(N,NchR,NchR);
-V_svd=zeros(N,NchR,NchR);
+S_svd=zeros(N,NchR,NchS);
+V_svd=zeros(N,NchS,NchS);
 for nf=1:N
     % 优化: 直接使用squeeze提取二维切片,避免双重循环
     G = squeeze(HestAll(nf,:,:));
