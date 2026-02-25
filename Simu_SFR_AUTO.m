@@ -158,12 +158,18 @@ for Nfbi=1+FBDone:Nfb+FBDone
     Gain(:,NumL:NumU)=Error(:,NumL:NumU);
 
     % 调整不同频率区间的各传声器增益情况
-    for i = 1:length(Gain(1,:))                   
-        [Gm(1,i),IGm(1,i)] = max(abs(Gain(:,i))); 
+    % 方案1：非对称调整系数 - 根据误差符号使用不同的调整幅度
+    for i = 1:length(Gain(1,:))
+        [Gm(1,i),IGm(1,i)] = max(abs(Gain(:,i)));
         for j = 1:NchR
-            if Gm(1,i)>2 && j~=IGm(1,i)           
-                Gain(j,i) = Gain(j,i) +...        
-                    sign(Gain(IGm(1,i),i))*0.2;
+            if Gm(1,i)>2 && j~=IGm(1,i)
+                % 根据误差符号使用不同的调整幅度
+                if Gain(IGm(1,i),i) > 0
+                    adjustStep = 0.2;  % 正误差（能量不足）用小步长
+                else
+                    adjustStep = 0.4;  % 负误差（能量过大）用大步长，加强衰减
+                end
+                Gain(j,i) = Gain(j,i) + sign(Gain(IGm(1,i),i))*adjustStep;
             end
         end
     end
