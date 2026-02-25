@@ -158,18 +158,19 @@ for Nfbi=1+FBDone:Nfb+FBDone
     Gain(:,NumL:NumU)=Error(:,NumL:NumU);
 
     % 调整不同频率区间的各传声器增益情况
-    % 方案1：非对称调整系数 - 根据误差符号使用不同的调整幅度
+    % 方案2：选择性通道调整 - 正误差协同增强，负误差选择性衰减
     for i = 1:length(Gain(1,:))
         [Gm(1,i),IGm(1,i)] = max(abs(Gain(:,i)));
         for j = 1:NchR
             if Gm(1,i)>2 && j~=IGm(1,i)
-                % 根据误差符号使用不同的调整幅度
                 if Gain(IGm(1,i),i) > 0
-                    adjustStep = 0.2;  % 正误差（能量不足）用小步长
+                    % 正误差（能量不足）：所有通道协同增强
+                    Gain(j,i) = Gain(j,i) + 0.2;
                 else
-                    adjustStep = 0.4;  % 负误差（能量过大）用大步长，加强衰减
+                    % 负误差（能量过大）：只减少主通道，其他通道略减或不变
+                    % 避免所有通道同时衰减导致的相位干涉问题
+                    Gain(j,i) = Gain(j,i) - 0.05;  % 其他通道仅略微衰减
                 end
-                Gain(j,i) = Gain(j,i) + sign(Gain(IGm(1,i),i))*adjustStep;
             end
         end
     end
