@@ -72,40 +72,59 @@ L_s=zeros(N,NchS,NchR);
 L_Re=zeros(N,NchR,NchR);
 s=zeros(min(NchS,NchR),N);
 
-% 方案A: 频率依赖的正则化参数（保持共轭对称性）
+% 方案A: 频率依赖的正则化参数（保持共轭对称性）/能量阈值
+% for nf=1:N
+%     % 计算当前频点对应的实际频率 (Hz)
+%     if nf <= floor(N/2)+1
+%         % 正频率部分: 0 到 Fs/2
+%         freq = (nf-1) * Fs / N;
+%     else
+%         % 负频率部分: 使用镜像点的频率（保证对称）
+%         mirror_nf = N - nf + 2;
+%         freq = (mirror_nf-1) * Fs / N;
+%     end
+% 
+%     % 根据频率调整正则化参数
+%     if freq < 70  % 70Hz以下，强烈放松正则化
+%         lmd0 = 0.01;  % 降低10倍
+%     elseif freq < 300  % 100-300Hz，中度放松
+%         lmd0 = 0.3;  % 降低约3倍
+%     elseif freq < 500  % 300-500Hz，轻度放松
+%         lmd0 = 0.6;
+%     else  % 500Hz以上，保持原值
+%         lmd0 = lmd0_base;
+%     end
+% 
+%     % 混合正则化参数计算
+%     s0=1/2/lmd0;
+%     s(:,nf) = diag(squeeze(S_svd(nf,:,:)));
+% 
+%     for i=1:min(NchS,NchR)
+%         if s(i,nf)>=1/s0
+%             lmd(nf,i)=0;
+%         elseif s(i,nf)>1/2/s0
+%             lmd(nf,i)=sqrt(s(i,nf)/s0-s(i,nf)^2);
+%         else
+%             lmd(nf,i)=1/2/s0;
+%         end
+%     end
+% 
+%     for k=1:min(NchS,NchR) %%奇异值矩阵
+%         L_s(nf,k,k)=S_svd(nf,k,k)/(S_svd(nf,k,k)^2+lmd(nf,k)^2);
+%         L_Re(nf,k,k)=S_svd(nf,k,k)^2/(S_svd(nf,k,k)^2+lmd(nf,k)^2);
+%     end
+% end
+%%%%%%%%%%%%%%%%
+% 方案B: 固定能量传递率L_Re的正则化参数
+lmd0=1;lmd_energy=0.5;
 for nf=1:N
-    % 计算当前频点对应的实际频率 (Hz)
-    if nf <= floor(N/2)+1
-        % 正频率部分: 0 到 Fs/2
-        freq = (nf-1) * Fs / N;
-    else
-        % 负频率部分: 使用镜像点的频率（保证对称）
-        mirror_nf = N - nf + 2;
-        freq = (mirror_nf-1) * Fs / N;
-    end
-
-    % 根据频率调整正则化参数
-    if freq < 100  % 100Hz以下，强烈放松正则化
-        lmd0 = 0.1;  % 降低10倍
-    elseif freq < 300  % 100-300Hz，中度放松
-        lmd0 = 0.3;  % 降低约3倍
-    elseif freq < 500  % 300-500Hz，轻度放松
-        lmd0 = 0.6;
-    else  % 500Hz以上，保持原值
-        lmd0 = lmd0_base;
-    end
-
-    % 混合正则化参数计算
-    s0=1/2/lmd0;
     s(:,nf) = diag(squeeze(S_svd(nf,:,:)));
 
     for i=1:min(NchS,NchR)
-        if s(i,nf)>=1/s0
+        if s(i,nf)>=lmd0
             lmd(nf,i)=0;
-        elseif s(i,nf)>1/2/s0
-            lmd(nf,i)=sqrt(s(i,nf)/s0-s(i,nf)^2);
         else
-            lmd(nf,i)=1/2/s0;
+            lmd(nf,i)=sqrt((1/lmd_energy-1)*s(i,nf)^2);
         end
     end
 
@@ -114,6 +133,7 @@ for nf=1:N
         L_Re(nf,k,k)=S_svd(nf,k,k)^2/(S_svd(nf,k,k)^2+lmd(nf,k)^2);
     end
 end
+clear S_svd
 endtime4=toc;
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Step5 驱动信号计算
@@ -138,6 +158,7 @@ eest = ifft(S.');
 audiowrite([FilePath, '\Reproduction.wav'],eest,Fs,"BitsPerSample",64);
 Re_T=ifft(Re.');
 audiowrite([FilePath, '\ReproductionResponse.wav'],Re_T,Fs,"BitsPerSample",64);
+clear U_svd V_svd
 endtime5=toc;
 %% Step6 误差计算
 tic;
@@ -171,7 +192,7 @@ FBDone=0;
 endtime6=toc;
 %% Step7 反馈循环
 tic;
-Nfb=1;
+Nfb=3;
 for Nfbi=1+FBDone:Nfb+FBDone
     FBDone_in=0;
     %增益计算
@@ -190,7 +211,7 @@ for Nfbi=1+FBDone:Nfb+FBDone
                 if Gain(IGm(1,i),i) > 0
                     adjustStep=0.2;
                 else
-                    adjustStep=1;
+                    adjustStep=0.4;
                 end
                 Gain(j,i) = Gain(j,i) + sign(Gain(IGm(1,i),i))*adjustStep;
             end
@@ -293,3 +314,9 @@ for i=1:NchR
 end
 %% 关闭窗口
 close all
+%%% 低频矛盾：低频奇异值过小，若用较大正则化参数，反馈的能量传递率极低，反馈无效果；
+%%% 若用较小正则化参数，可能会爆音；
+%%%（正则化参数决定了目标声的能量有多少传递过去，反馈不动是因为正则化参数相对奇异值过大）
+%%%思路1：低频用较小的固定正则化参数，根据最大奇异值maxs取
+%%%思路2：正则化参数从大往小调，反馈效果差说明正则化参数偏大，初始误差为负说明正则化参数偏小；
+%%%思路3：取消s0，采用能量传递率，重新关联lmd与奇异值。当奇异值<x时，能量传递率为50，当奇异值>x时，能量传递率100；

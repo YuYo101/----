@@ -1,12 +1,12 @@
 %%SFR_Auto
-%% 参数设置
+%% Step1 参数设置 
 clc;clear;
-NchS=30;NchR=10;  
-[Tempfile, FilePath] = uigetfile({'*.mat','mat文件 (*.mat)';...
-    '*.*','所有文件 (*.*)'},'请选择灵敏度文件');
+NchS=30;NchR=10;
+InputChannelMap=[1:NchR];
+FilePath = uigetdir;
 % FilePath='D:\声品质数据库\SFR\SFR_Auto\';
-load([FilePath,'Sensi.mat']);
-Sensi=Sensi(1:NchR);
+load([FilePath,'\Sensi.mat']);
+Sensi=Sensi(InputChannelMap);
 %% 目标声导入
 %%连接数据库
 dbHost = "nvh-dmu-test-default.rdsm4xq6y4k2pkl.rds.bj.baidubce.com";
@@ -47,71 +47,150 @@ end
 close(conn);
 audiowrite([FilePath,'TargetSound.wav'],data,Fs,BitsPerSample=64);
 % clear conn data_read
-%% 目标声读取
+%% Step2 目标声读取
 % wav
-% [OriginTargetSound, Fs] = audioread([FilePath,'TargetSound.wav']);
-OriginTargetSound=data;
-TargetSound=OriginTargetSound(:,1:NchR);
+[OriginTargetSound, Fs] = audioread([FilePath,'\10ch_10s_hp30_lp20000_20260209_road_shuinilu_speed_40_03.wav']);
+% OriginTargetSound=data;
+TargetSound=OriginTargetSound(:,InputChannelMap);
 N=size(OriginTargetSound,1);
 T=N/Fs;
-%% 传函读取
-load([FilePath,'ir.mat']);
-ir=ir(:,1:NchR,1:NchS);
-% ir=resample(ir,Fs,44100);
-% 优化: 使用向量化FFT一次性计算所有通道
-HestAll=zeros(N,NchR,NchS);
-for i=1:NchR
-    HestAll(:,i,:)=fft(ir(:,i,:), N, 1);  % 沿第一维度FFT,向量化处理
+%% Step3 传函读取
+tic;
+try
+    load([FilePath,'\FRF\SVD.mat']);
+    if size(S_svd,1) ~=N
+        load([FilePath,'\FRF\ir.mat']);
+        ir=ir(:,InputChannelMap,1:NchS);
+        % ir=resample(ir,Fs,44100);
+        % 优化: 使用向量化FFT一次性计算所有通道
+        HestAll=zeros(N,NchR,NchS);
+        for i=1:NchR
+            HestAll(:,i,:)=fft(ir(:,i,:), N, 1);  % 沿第一维度FFT,向量化处理
+        end
+        % 计算svd结果
+        % 优化: 预分配并直接使用三维矩阵S索引
+        U_svd=zeros(N,NchR,NchR);
+        S_svd=zeros(N,NchR,NchS);
+        V_svd=zeros(N,NchS,NchS);
+        for nf=1:N
+            % 优化: 直接使用squeeze提取二维切片,避免双重循环
+            G = squeeze(HestAll(nf,:,:));
+            [U_svd(nf,:,:),S_svd(nf,:,:),V_svd(nf,:,:)] = svd(G);
+        end
+        save([FilePath,'\FRF\SVD.mat'],"U_svd","S_svd","V_svd",'-v7.3','-nocompression');
+        clear HestAll G ir
+    end
+catch
+    load([FilePath,'\FRF\ir.mat']);
+    ir=ir(:,InputChannelMap,1:NchS);
+    % ir=resample(ir,Fs,44100);
+    % 优化: 使用向量化FFT一次性计算所有通道
+    HestAll=zeros(N,NchR,NchS);
+    for i=1:NchR
+        HestAll(:,i,:)=fft(ir(:,i,:), N, 1);  % 沿第一维度FFT,向量化处理
+    end
+    % 计算svd结果
+    % 优化: 预分配并直接使用三维矩阵S索引
+    U_svd=zeros(N,NchR,NchR);
+    S_svd=zeros(N,NchR,NchS);
+    V_svd=zeros(N,NchS,NchS);
+    for nf=1:N
+        % 优化: 直接使用squeeze提取二维切片,避免双重循环
+        G = squeeze(HestAll(nf,:,:));
+        [U_svd(nf,:,:),S_svd(nf,:,:),V_svd(nf,:,:)] = svd(G);
+    end
+    save([FilePath,'\FRF\SVD.mat'],"U_svd","S_svd","V_svd",'-v7.3','-nocompression');
+    clear HestAll G ir
 end
-% 计算svd结果
-% 优化: 预分配并直接使用三维矩阵索引
-U_svd=zeros(N,NchR,NchR);
-S_svd=zeros(N,NchR,NchS);
-V_svd=zeros(N,NchS,NchS);
-for nf=1:N
-    % 优化: 直接使用squeeze提取二维切片,避免双重循环
-    G = squeeze(HestAll(nf,:,:));
-    [U_svd(nf,:,:),S_svd(nf,:,:),V_svd(nf,:,:)] = svd(G);
-end
-%% 正则化参数
-lmd0=1;
+endtime3=toc;
+%% Step4 正则化参数
+tic;
+lmd0_base=1;  % 基准正则化参数
 lmd = zeros(N, min(NchS,NchR));
-%混合正则化参数
-s0=1/2/lmd0;
 % 优化: 向量化提取对角线元素和正则化参数计算
 L_s=zeros(N,NchS,NchR);
-for nf=1:N
-    s = diag(squeeze(S_svd(nf,:,:)));
-    % 向量化计算正则化参数
-    lmd_temp = zeros(min(NchS,NchR),1);
-    lmd_temp(s>=1/s0) = 0;
-    mask_mid = (s>1/2/s0) & (s<1/s0);
-    lmd_temp(mask_mid) = sqrt(s(mask_mid)/s0-s(mask_mid).^2);
-    lmd_temp(s<=1/2/s0) = 1/2/s0;
-    lmd(nf,:) = lmd_temp';
+s=zeros(min(NchS,NchR),N);
 
-    % 向量化计算L_s矩阵
-    S_diag = diag(squeeze(S_svd(nf,:,:)));
-    for k=1:min(NchS,NchR)
-        L_s(nf,k,k) = S_diag(k)/(S_diag(k)^2+lmd(nf,k)^2);
+% 方案A: 频率依赖的正则化参数（保持共轭对称性）/能量阈值
+% for nf=1:N
+%     % 计算当前频点对应的实际频率 (Hz)
+%     if nf <= floor(N/2)+1
+%         % 正频率部分: 0 到 Fs/2
+%         freq = (nf-1) * Fs / N;
+%     else
+%         % 负频率部分: 使用镜像点的频率（保证对称）
+%         mirror_nf = N - nf + 2;
+%         freq = (mirror_nf-1) * Fs / N;
+%     end
+% 
+%     % 根据频率调整正则化参数
+%     if freq < 70  % 70Hz以下，强烈放松正则化
+%         lmd0 = 0.01;  % 降低10倍
+%     elseif freq < 300  % 100-300Hz，中度放松
+%         lmd0 = 0.3;  % 降低约3倍
+%     elseif freq < 500  % 300-500Hz，轻度放松
+%         lmd0 = 0.6;
+%     else  % 500Hz以上，保持原值
+%         lmd0 = lmd0_base;
+%     end
+% 
+%     % 混合正则化参数计算
+%     s0=1/2/lmd0;
+%     s(:,nf) = diag(squeeze(S_svd(nf,:,:)));
+% 
+%     for i=1:min(NchS,NchR)
+%         if s(i,nf)>=1/s0
+%             lmd(nf,i)=0;
+%         elseif s(i,nf)>1/2/s0
+%             lmd(nf,i)=sqrt(s(i,nf)/s0-s(i,nf)^2);
+%         else
+%             lmd(nf,i)=1/2/s0;
+%         end
+%     end
+% 
+%     for k=1:min(NchS,NchR) %%奇异值矩阵
+%         L_s(nf,k,k)=S_svd(nf,k,k)/(S_svd(nf,k,k)^2+lmd(nf,k)^2);
+%     end
+% end
+%%%%%%%%%%%%%%%%
+% 方案B: 固定能量传递率L_Re的正则化参数
+lmd0=1;lmd_energy=0.5;
+for nf=1:N
+    s(:,nf) = diag(squeeze(S_svd(nf,:,:)));
+
+    for i=1:min(NchS,NchR)
+        if s(i,nf)>=lmd0
+            lmd(nf,i)=0;
+        else
+            lmd(nf,i)=sqrt((1/lmd_energy-1)*s(i,nf)^2);
+        end
+    end
+
+    for k=1:min(NchS,NchR) %%奇异值矩阵
+        L_s(nf,k,k)=S_svd(nf,k,k)/(S_svd(nf,k,k)^2+lmd(nf,k)^2);
     end
 end
-%% 驱动信号计算
+clear S_svd
+endtime4=toc;
+%% Step5 驱动信号计算
+tic;
 TargetSound_V = TargetSound.*Sensi;  % 将声压数据转换为电压数据[Pa]*[V/Pa] = [V]
-yro=TargetSound_V(1:N,1:NchR);
+yro=TargetSound_V;
 Ro = fft(yro,N);          % 使用fft函数将yro矩阵变为频域信号R
 % 进行声场复现计算
 % 优化: 预计算VLU矩阵,避免反馈循环中重复计算
 S = zeros(NchS, N);
+Re = zeros(NchR, N);
 VLU=zeros(N,NchS,NchR);
 for nf = 1:N                                % 采样点设置
     % 预计算VLU = V * L_s * U'
     VLU(nf,:,:)=(squeeze(V_svd(nf,:,:))) * (squeeze(L_s(nf,:,:))) * (squeeze(U_svd(nf,:,:)))';
-    S(:,nf)=(squeeze(VLU(nf,:,:)))*(Ro(nf,1:NchR).');
+    S(:,nf)=(squeeze(VLU(nf,:,:)))*(Ro(nf,:).');
 end
-Eest = S.';
-eest = ifft(Eest);
-audiowrite([FilePath, 'Reproduction.wav'],eest,Fs,"BitsPerSample",64);
+eest = ifft(S.');
+audiowrite([FilePath, '\Reproduction.wav'],eest,Fs,"BitsPerSample",64);
+clear U_svd V_svd
+endtime5=toc;
 %% 播放
 SafeRMS = 1;SafeLevel = 0.55;
 BufferSize=2048;
@@ -176,53 +255,61 @@ release(deviceWriter);
 release(deviceReader);
 release(fileWriter);
 %%%%%%%%%后处理%%%%%%%%%
+%% Step6 误差计算
+tic;
 [ReproductionSound, ~] = audioread(AudioFromDevice);
 ReproductionSound=ReproductionSound(1:N,1:NchR);
 %导出Feedback变量到工作区，重置反馈声为目标声
 yo_fb = TargetSound_V;   %%%循环外
 %基于自定义频带的误差计算
-% 定义自定义频带: 30个频带，20Hz开始，每10Hz一个频带
-numcf = 30;  % 频带数量
+% 定义自定义频带: 
+% 20-50Hz:30个频带，20Hz开始，每1Hz一个频带
+% 20-50Hz:300个频带，50Hz开始，每10Hz一个频带
+numcf = 3000;  % 频带数量
+FreBandwise=1; %20-50频率带宽
+% FreBandwise2=10; %50-3050频率带宽
 FreqBands = zeros(numcf, 2);
 for i = 1:numcf
-    FreqBands(i,1) = 20 + (i-1)*10;  % 下限频率
-    FreqBands(i,2) = 20 + i*10;      % 上限频率
+    FreqBands(i,1) = 20 + (i-1)*FreBandwise;  % 下限频率
+    FreqBands(i,2) = 20 + i*FreBandwise;      % 上限频率
 end
 FreqCenter = mean(FreqBands, 2);  % 中心频率
 
 % 计算目标声和复现声在各频带的能量
-O = computeBandEnergy(TargetSound_V(BufferSize*10+1:end-BufferSize*10,1:NchR), Fs, FreqBands);
-R = computeBandEnergy(ReproductionSound(BufferSize*10+1:end-BufferSize*10,1:NchR), Fs, FreqBands);
+O = computeBandEnergy(TargetSound_V, Fs, FreqBands);
+R = computeBandEnergy(ReproductionSound, Fs, FreqBands);
 Error = 10.*log10(O./R);
 Error = Error.';
 EdB=[FreqCenter.'; Error];
-save([FilePath,'Error.mat'],"EdB");
-FreL=20;FreU=300;             %%%%%%%反馈频段%%%%%%%%
+save([FilePath,'\Error.mat'],"EdB");
+FreL=20.5;FreU=3000;             %%%%%%%反馈频段%%%%%%%%
 NumL=find(FreqCenter==FreL);NumU=find(FreqCenter>=FreU,1,'first');
 FBDone=0;
-%%%%%%%%%   反馈循环     %%%%%%%%%
+endtime6=toc;
+%% Step7 反馈循环
+tic;
 Nfb=3;
 for Nfbi=1+FBDone:Nfb+FBDone
     FBDone_in=0;
     %增益计算
     Gain = zeros(NchR,numcf);
-    Gm = zeros(1,NchR);
+    Gm = zeros(1,NchR);%%%%%维度不对
     IGm = zeros(1,NchR);
 
-    for i = NumL : NumU 
-        for j = 1:NchR        
-            Gain(j,i) = Error(j,i);
-        end
-        [Gm(1,i),IGm(1,i)] = max(abs(Gain(:,i)));
-    end
+    Gain(:,NumL:NumU)=Error(:,NumL:NumU);
 
     % 调整不同频率区间的各传声器增益情况
+    % 方案1：非对称调整系数 - 正误差小系数，负误差增大系数
     for i = 1:length(Gain(1,:))
-        [Gm(1,i),IGm(1,i)] = max(abs(Gain(:,i))); % 求出某个频率区间的最大值
+        [Gm(1,i),IGm(1,i)] = max(abs(Gain(:,i)));
         for j = 1:NchR
             if Gm(1,i)>2 && j~=IGm(1,i)
-                Gain(j,i) = Gain(j,i) +...
-                    sign(Gain(IGm(1,i),i))*0.2;
+                if Gain(IGm(1,i),i) > 0
+                    adjustStep=0.2;
+                else
+                    adjustStep=0.4;
+                end
+                Gain(j,i) = Gain(j,i) + sign(Gain(IGm(1,i),i))*adjustStep;
             end
         end
     end
@@ -237,11 +324,10 @@ for Nfbi=1+FBDone:Nfb+FBDone
     % 优化: 直接使用预计算的VLU矩阵,避免重复SVD和矩阵乘法
     S = zeros(NchS, N);
     for nf = 1:N                            % 采样点设置
-        S(:,nf)=squeeze(VLU(nf,:,:))*(Ro(nf,1:NchR).');
+        S(:,nf)=squeeze(VLU(nf,:,:))*(Ro(nf,:).');
     end
-    Eest = S.';
-    eest = ifft(Eest);
-    audiowrite([FilePath, ['Feedback',num2str(Nfbi),'.wav']],eest,Fs,"BitsPerSample",64);%%保存复现声源信号
+    eest = ifft(S.');
+    audiowrite([FilePath, ['\Feedback',num2str(Nfbi),'.wav']],eest,Fs,"BitsPerSample",64);
     %重新播放
     AudioToDevice = [FilePath,'Feedback',num2str(Nfbi),'.wav'];
     AudioFromDevice = [FilePath,'FeedbackResponse',num2str(Nfbi),'.wav'];
@@ -301,15 +387,16 @@ for Nfbi=1+FBDone:Nfb+FBDone
     [FeedbackSound, ~] = audioread(AudioFromDevice);
     FeedbackSound=FeedbackSound(1:N,1:NchR);
     %基于自定义频带的误差计算
-    O = computeBandEnergy(TargetSound_V(BufferSize*10+1:end-BufferSize*10,1:NchR), Fs, FreqBands);
-    R = computeBandEnergy(FeedbackSound(BufferSize*10+1:end-BufferSize*10,1:NchR), Fs, FreqBands);
+    O = computeBandEnergy(TargetSound_V, Fs, FreqBands);
+    R = computeBandEnergy(FeedbackSound, Fs, FreqBands);
     Error = 10.*log10(O./R);
     Error = Error.';
     EdB=[FreqCenter.'; Error];
-    save([FilePath,'Error',num2str(Nfbi),'.mat'],"EdB");
+    save([FilePath,'\Error',num2str(Nfbi),'.mat'],"EdB");
     FBDone_in=FBDone_in+1;
 end
 FBDone=FBDone+FBDone_in;
+endtime7=toc;
 %% 驱动信号导出至数据库
 dbHost = "nvh-dmu-test-default.rdsm4xq6y4k2pkl.rds.bj.baidubce.com";
 dbPort = 13307;
